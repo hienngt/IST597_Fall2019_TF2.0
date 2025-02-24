@@ -268,7 +268,7 @@ def compare_with_svm_and_forest():
     kmeans.fit(weights)
 
     # Visualize clusters using t-SNE
-    tsne = TSNE(n_components=2, random_state=42)
+    tsne = TSNE(n_components=2, perplexity=2, n_iter=300, random_state=42)
     weights_2d = tsne.fit_transform(weights)
 
     plt.figure(figsize=(10, 8))
