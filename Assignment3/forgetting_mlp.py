@@ -178,22 +178,49 @@ plt.grid(True)
 plt.tight_layout()
 plt.show()
 
+def plot_model_architecture():
+    # Plot model architecture
+    mlp_model = create_mlp_model(depth=2, dropout_rate=0.5, optimizer_name="adam", loss_function="nll")
+    plot_model(mlp_model, to_file="mlp_model.png", show_shapes=True, show_layer_names=True)
 
-# Function to plot grouped bar charts for metrics
-def plot_grouped_bar_chart(categories, metric_values, title, xlabel):
+
+def get_permuted_image():
+    image_idx = 0
+    task_id = 0
+
+    # Get the original image
+    original_image = x_train[image_idx].reshape(28, 28)
+
+    # Apply the permutation to get the permuted image
+    permutation = task_permutations[task_id]
+    permuted_image = x_train[image_idx, permutation].reshape(28, 28)
+
+    # Display the original and permuted images
+    fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+
+    ax[0].imshow(original_image, cmap='gray')
+    ax[0].set_title('Original Image')
+
+    ax[1].imshow(permuted_image, cmap='gray')
+    ax[1].set_title('Permuted Image')
+
+    plt.show()
+
+
+def plot_grouped_bar_chart(categories, metric_values):
     metrics = ["ACC", "BWT", "TBWT", "CBWT"]
     bar_width = 0.2
     x = np.arange(len(categories))
 
     plt.figure(figsize=(10, 6))
-    plt.bar(x, metric_values[:, 0], width=bar_width, label="ACC", color="blue")
-    plt.bar(x + bar_width, metric_values[:, 1], width=bar_width, label="BWT", color="red")
+    plt.bar(x, metric_values[:, 0], width=bar_width, label="ACC", color="#7f7f7f")
+    plt.bar(x + bar_width, metric_values[:, 1], width=bar_width, label="BWT", color="#17becf")
     plt.bar(x + 2 * bar_width, metric_values[:, 2], width=bar_width, label="TBWT", color="teal")
-    plt.bar(x + 3 * bar_width, metric_values[:, 3], width=bar_width, label="CBWT", color="orange")
+    plt.bar(x + 3 * bar_width, metric_values[:, 3], width=bar_width, label="CBWT", color="#e377c2")
 
-    plt.xlabel(xlabel)
+    # plt.xlabel(xlabel)
     plt.ylabel("Metric Value")
-    plt.title(title)
+    # plt.title(title)
     plt.xticks(x + 1.5 * bar_width, categories)
     plt.axhline(0, color="black", linewidth=1)
     plt.legend()
