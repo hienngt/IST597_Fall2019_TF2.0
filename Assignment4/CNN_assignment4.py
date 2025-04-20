@@ -1,210 +1,160 @@
-# -*- coding: utf-8 -*-
-"""CNN_week9.ipynb
-
-IST597 :- Implementing CNN from scratch
-Week 9 Tutorial
-
-Author:- aam35
-"""
-
-import tensorflow as tf
+import os
+import random
 import numpy as np
-import time
-import tensorflow.contrib.eager as tfe
-tf.enable_eager_execution()
-tf.executing_eagerly()
-seed = 1234
-tf.random.set_random_seed(seed=seed)
-np.random.seed(seed)
+import tensorflow as tf
+import matplotlib as plt
 
-from tensorflow.examples.tutorials.mnist import input_data
-data = input_data.read_data_sets("/tmp/data/", one_hot=True, reshape=False)
+# Set random seed for reproducibility
+SEED = 2701
+os.environ['PYTHONHASHSEED'] = str(SEED)
+random.seed(SEED)
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+
+# Load MNIST dataset
+mnist = tf.keras.datasets.mnist
+(train_images, train_labels), (test_images, test_labels) = mnist.load_data()
+train_images = train_images.astype(np.float32) / 255.0
+train_images = np.expand_dims(train_images, axis=-1)  # (batch, 28, 28, 1)
+test_images = test_images.astype(np.float32) / 255.0
+test_images = np.expand_dims(test_images, axis=-1)
+train_labels = tf.keras.utils.to_categorical(train_labels, 10)
+test_labels = tf.keras.utils.to_categorical(test_labels, 10)
 
 batch_size = 64
 hidden_size = 100
 learning_rate = 0.01
 output_size = 10
 
-class CNN(object):
-  def __init__(self,hidden_size,output_size,device=None):
-      filter_h, filter_w, filter_c , filter_n = 5 ,5 ,1 ,30
-      self.W1 = tf.Variable(tf.random_normal([filter_h, filter_w, filter_c, filter_n], stddev=0.1))
-      self.b1 = tf.Variable(tf.zeros([filter_n]),dtype=tf.float32)
-      self.W2 = tf.Variable(tf.random_normal([14*14*filter_n, hidden_size], stddev=0.1))
-      self.b2 = tf.Variable(tf.zeros([hidden_size]),dtype=tf.float32)
-      self.W3 = tf.Variable(tf.random_normal([hidden_size, output_size], stddev=0.1))
-      self.b3 = tf.Variable(tf.zeros([output_size]),dtype=tf.float32)
-      self.variables = [self.W1,self.b1, self.W2, self.b2, self.W3, self.b3]
-      self.device = device
-      self.size_output = output_size
-  
-  def flatten(self,X, window_h, window_w, window_c, out_h, out_w, stride=1, padding=0):
-    
-      X_padded = tf.pad(X, [[0,0], [padding, padding], [padding, padding], [0,0]])
+def batch_norm_custom(x, gamma, beta, epsilon=1e-5):
+    mean = tf.reduce_mean(x, axis=0)
+    variance = tf.reduce_mean(tf.square(x - mean), axis=0)
+    x_hat = (x - mean) / tf.sqrt(variance + epsilon)
+    return gamma * x_hat + beta
 
-      windows = []
-      for y in range(out_h):
-          for x in range(out_w):
-              window = tf.slice(X_padded, [0, y*stride, x*stride, 0], [-1, window_h, window_w, -1])
-              windows.append(window)
-      stacked = tf.stack(windows) # shape : [out_h, out_w, n, filter_h, filter_w, c]
+def layer_norm_custom(x, gamma, beta, epsilon=1e-5):
+    mean = tf.reduce_mean(x, axis=1, keepdims=True)
+    variance = tf.reduce_mean(tf.square(x - mean), axis=1, keepdims=True)
+    x_hat = (x - mean) / tf.sqrt(variance + epsilon)
+    return gamma * x_hat + beta
 
-      return tf.reshape(stacked, [-1, window_c*window_w*window_h])
-  
-  def convolution(self,X, W, b, padding, stride):
-      n, h, w, c = map(lambda d: d.value, X.get_shape())
-      #print(X.get_shape())
-      #print(data.train.images.get_shape())
-      filter_h, filter_w, filter_c, filter_n = [d.value for d in W.get_shape()]
-    
-      out_h = (h + 2*padding - filter_h)//stride + 1
-      out_w = (w + 2*padding - filter_w)//stride + 1
+def weight_norm_custom(W, g):
+    norm = tf.norm(W, axis=1, keepdims=True)  # normalize across input dim
+    W_normalized = W / (norm + 1e-8)
+    return W_normalized * tf.reshape(g, [1, -1])
 
-      X_flat = self.flatten(X, filter_h, filter_w, filter_c, out_h, out_w, stride, padding)
-      W_flat = tf.reshape(W, [filter_h*filter_w*filter_c, filter_n])
-    
-      z = tf.matmul(X_flat, W_flat) + b     # b: 1 X filter_n
-    
-      return tf.transpose(tf.reshape(z, [out_h, out_w, n, filter_n]), [2, 0, 1, 3])
-    
- 
-    
-  def relu(self,X):
-      return tf.maximum(X, tf.zeros_like(X))
-    
-  def max_pool(self,X, pool_h, pool_w, padding, stride):
-      n, h, w, c = [d.value for d in X.get_shape()]
-    
-      out_h = (h + 2*padding - pool_h)//stride + 1
-      out_w = (w + 2*padding - pool_w)//stride + 1
+class CNN(tf.Module):
+    def __init__(self, hidden_size, output_size, norm_type='none', use_custom=True):
+        super().__init__()
+        self.norm_type = norm_type
+        self.use_custom = use_custom
+        self.W1 = tf.Variable(tf.random.normal([5, 5, 1, 30], stddev=0.1))
+        self.b1 = tf.Variable(tf.zeros([30]))
+        self.W2 = tf.Variable(tf.random.normal([14*14*30, hidden_size], stddev=0.1))
+        self.b2 = tf.Variable(tf.zeros([hidden_size]))
+        self.W3 = tf.Variable(tf.random.normal([hidden_size, output_size], stddev=0.1))
+        self.b3 = tf.Variable(tf.zeros([output_size]))
 
-      X_flat = self.flatten(X, pool_h, pool_w, c, out_h, out_w, stride, padding)
+        self.gamma1 = tf.Variable(tf.ones([hidden_size]))
+        self.beta1 = tf.Variable(tf.zeros([hidden_size]))
+        self.gamma2 = tf.Variable(tf.ones([output_size]))
+        self.beta2 = tf.Variable(tf.zeros([output_size]))
+        self.g_W3 = tf.Variable(tf.ones([output_size]))
 
-      pool = tf.reduce_max(tf.reshape(X_flat, [out_h, out_w, n, pool_h*pool_w, c]), axis=3)
-      return tf.transpose(pool, [2, 0, 1, 3])
+        if not use_custom:
+            self.bn1 = tf.keras.layers.BatchNormalization()
+            self.ln_hidden = tf.keras.layers.LayerNormalization()
+            self.ln_output = tf.keras.layers.LayerNormalization()
 
-    
-  def affine(self,X, W, b):
-      n = X.get_shape()[0].value # number of samples
-      X_flat = tf.reshape(X, [n, -1])
-      return tf.matmul(X_flat, W) + b 
-    
-  def softmax(self,X):
-      X_centered = X - tf.reduce_max(X) # to avoid overflow
-      X_exp = tf.exp(X_centered)
-      exp_sum = tf.reduce_sum(X_exp, axis=1)
-      return tf.transpose(tf.transpose(X_exp) / exp_sum) 
-    
-  
-  def cross_entropy_error(self,yhat, y):
-      return -tf.reduce_mean(tf.log(tf.reduce_sum(yhat * y, axis=1)))
-    
-  
-  def forward(self,X):
-      if self.device is not None:
-        with tf.device('gpu:0' if self.device == 'gpu' else 'cpu'):
-          self.y = self.compute_output(X)
-      else:
-        self.y = self.compute_output(X)
-      
-      return self.y
-    
-    
-  def loss(self, y_pred, y_true):
-      '''
-      y_pred - Tensor of shape (batch_size, size_output)
-      y_true - Tensor of shape (batch_size, size_output)
-      '''
-      y_true_tf = tf.cast(tf.reshape(y_true, (-1, self.size_output)), dtype=tf.float32)
-      y_pred_tf = tf.cast(y_pred, dtype=tf.float32)
-      return tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=y_pred_tf, labels=y_true_tf))
-    
-    
-  def backward(self, X_train, y_train):
-      """
-      backward pass
-      """
-      # optimizer
-      # Test with SGD,Adam, RMSProp
-      optimizer = tf.train.GradientDescentOptimizer(learning_rate=learning_rate)
-      #predicted = self.forward(X_train)
-      #current_loss = self.loss(predicted, y_train)
-      #optimizer.minimize(current_loss, self.variables)
+    def __call__(self, x):
+        x = tf.nn.conv2d(x, self.W1, strides=1, padding='SAME') + self.b1
+        x = tf.nn.relu(x)
+        x = tf.nn.max_pool2d(x, ksize=2, strides=2, padding='VALID')
+        x = tf.reshape(x, [x.shape[0], -1])
+        x = tf.matmul(x, self.W2) + self.b2
 
-      #optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
-      with tf.GradientTape() as tape:
-          predicted = self.forward(X_train)
-          current_loss = self.loss(predicted, y_train)
-      #print(predicted)
-      #print(current_loss)
-      #current_loss_tf = tf.cast(current_loss, dtype=tf.float32)
-      grads = tape.gradient(current_loss, self.variables)
-      optimizer.apply_gradients(zip(grads, self.variables),
-                              global_step=tf.train.get_or_create_global_step())
-      
-      
-  def compute_output(self,X):
-      conv_layer1 = self.convolution(X, self.W1, self.b1, padding=2, stride=1)
-      conv_activation = self.relu(conv_layer1)
-      conv_pool = self.max_pool(conv_activation, pool_h=2, pool_w=2, padding=0, stride=2)
-      conv_affine =self.affine(conv_pool, self.W2,self.b2)
-      conv_affine_activation = self.relu(conv_affine)
-      
-      conv_affine_1 = self.affine(conv_affine_activation, self.W3, self.b3)
-      return conv_affine_1
+        if self.norm_type == 'batchnorm':
+            x = batch_norm_custom(x, self.gamma1, self.beta1) if self.use_custom else self.bn1(x)
+        elif self.norm_type == 'layernorm':
+            x = layer_norm_custom(x, self.gamma1, self.beta1) if self.use_custom else self.ln_hidden(x)
 
-def accuracy_function(yhat,true_y):
-  correct_prediction = tf.equal(tf.argmax(yhat, 1), tf.argmax(true_y, 1))
-  accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
-  return accuracy
+        x = tf.nn.relu(x)
 
-# Initialize model using GPU
-mlp_on_cpu = CNN(hidden_size,output_size, device='gpu')
+        if self.norm_type == 'weightnorm':
+            W3 = weight_norm_custom(self.W3, self.g_W3) if self.use_custom else self.W3
+        else:
+            W3 = self.W3
 
-num_epochs = 4
-train_x =  tf.convert_to_tensor(data.train.images)
-train_y = tf.convert_to_tensor(data.train.labels)
-time_start = time.time()
-num_train = 55000
-z= 0
+        x = tf.matmul(x, W3) + self.b3
 
-for epoch in range(num_epochs):
-        train_ds = tf.data.Dataset.from_tensor_slices((data.train.images, data.train.labels)).map(lambda x, y: (x, tf.cast(y, tf.float32)))\
-           .shuffle(buffer_size=1000)\
-           .batch(batch_size=batch_size)
-        loss_total = tf.Variable(0, dtype=tf.float32)
-        accuracy_total = tf.Variable(0, dtype=tf.float32)
-        for inputs, outputs in train_ds:
-            preds = mlp_on_cpu.forward(inputs)
-            loss_total = loss_total + mlp_on_cpu.loss(preds, outputs)
-#             accuracy_train = accuracy_function(preds,outputs)
-#             accuracy_total = accuracy_total + accuracy_train
-            mlp_on_cpu.backward(inputs, outputs)
-            #print(z)
-            #z = z+ 1
-        print('Number of Epoch = {} - loss:= {:.4f}'.format(epoch + 1, loss_total.numpy() / num_train))
-        preds = mlp_on_cpu.compute_output(train_x)
-        accuracy_train = accuracy_function(preds,train_y)
-        
-        accuracy_train = accuracy_train * 100
-        print ("Training Accuracy = {}".format(accuracy_train.numpy()))
-        
-        
-#         preds_val = mlp_on_cpu.compute_output(data.validation.images)
-#         accuracy_val = accuracy_function(preds_val,data.validation.labels)
-#         accuracy_val = accuracy_val * 100
-#         print ("Validation Accuracy = {}".format(accuracy_val.numpy()))
- 
-#test accuracy
-test_x =  tf.convert_to_tensor(data.test.images)
-test_y = tf.convert_to_tensor(data.test.labels)
-preds_test = mlp_on_cpu.compute_output(test_x)
-accuracy_test = accuracy_function(preds_test,test_y)
-# To keep sizes compatible with model
-accuracy_test = accuracy_test * 100
-print ("Test Accuracy = {}".format(accuracy_test.numpy()))
+        if self.norm_type == 'layernorm':
+            x = layer_norm_custom(x, self.gamma2, self.beta2) if self.use_custom else self.ln_output(x)
 
-        
-# time_taken = time.time() - time_start
-# print('\nTotal time taken (in seconds): {:.2f}'.format(time_taken))
-# #For per epoch_time = Total_Time / Number_of_epochs
+        return x
+
+def compute_loss(logits, labels):
+    return tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=labels, logits=logits))
+
+def compute_accuracy(logits, labels):
+    pred = tf.argmax(logits, axis=1)
+    true = tf.argmax(labels, axis=1)
+    return tf.reduce_mean(tf.cast(tf.equal(pred, true), tf.float32))
+
+def train_model(norm_type, use_custom, epochs=20):
+    model = CNN(hidden_size, output_size, norm_type, use_custom)
+    optimizer = tf.keras.optimizers.SGD(learning_rate)
+
+    train_dataset = tf.data.Dataset.from_tensor_slices((train_images, train_labels)).shuffle(10000).batch(batch_size)
+    history = {'loss': [], 'accuracy': []}
+
+    for epoch in range(epochs):
+        epoch_loss = 0
+        epoch_accuracy = 0
+        for step, (x_batch, y_batch) in enumerate(train_dataset):
+            with tf.GradientTape() as tape:
+                logits = model(x_batch)
+                loss = compute_loss(logits, y_batch)
+            grads = tape.gradient(loss, model.trainable_variables)
+            optimizer.apply_gradients(zip(grads, model.trainable_variables))
+            acc = compute_accuracy(logits, y_batch)
+            epoch_loss += loss.numpy()
+            epoch_accuracy += acc.numpy()
+        history['loss'].append(epoch_loss / (step+1))
+        history['accuracy'].append(epoch_accuracy / (step+1))
+        print(f"{norm_type.upper()} ({'Custom' if use_custom else 'Built-in'}) - Epoch {epoch+1}, Loss: {epoch_loss / (step+1):.4f}, Accuracy: {epoch_accuracy / (step+1):.4f}")
+    return history
+
+# Run all variants
+histories = {}
+settings = [
+    ('none', True),
+    ('batchnorm', True),
+    ('batchnorm', False),
+    ('layernorm', True),
+    ('layernorm', False),
+    ('weightnorm', True),
+]
+for norm_type, use_custom in settings:
+    key = f"{norm_type}_{'custom' if use_custom else 'builtin'}"
+    histories[key] = train_model(norm_type, use_custom)
+
+# Plot
+plt.figure(figsize=(14,6))
+for key in histories:
+    plt.plot(histories[key]['accuracy'], label=f"{key} accuracy")
+plt.title("Training Accuracy Comparison")
+plt.xlabel("Epoch")
+plt.ylabel("Accuracy")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+plt.figure(figsize=(14,6))
+for key in histories:
+    plt.plot(histories[key]['loss'], label=f"{key} loss")
+plt.title("Training Loss Comparison")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.legend()
+plt.grid(True)
+plt.show()
